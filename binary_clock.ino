@@ -31,6 +31,10 @@ bool blinkState = true;
 unsigned long lastBlinkTime = 0;
 bool isHoldingInBinaryMode = false;
 
+// === ПОВОРОТ ЭКРАНА ===
+bool isScreenRotated = false;
+bool actionProcessed = false;  // ФЛАГ: была ли обработана акция при этом нажатии
+
 // === ЗМЕЙКА (СОКРАЩЕНО ДО 64 СЕГМЕНТОВ) ===
 int snakeX[64];
 int snakeY[64];
@@ -71,89 +75,17 @@ const byte smallDigits[10][7] PROGMEM = {
     {0b0110, 0b1001, 0b1001, 0b0111, 0b0001, 0b1001, 0b0110}
 };
 
-// === ШРИФТ БЕГУЩЕЙ СТРОКИ "TrueConf" (повёрнуто на 180°) ===
+// === ШРИФТ БЕГУЩЕЙ СТРОКИ "TrueConf" ===
 const byte scrollingFont[8][7] PROGMEM = {
-    // T
-    {
-      0b00000, 
-      0b11111,  
-      0b00100, 
-      0b00100,
-      0b00100, 
-      0b00100, 
-      0b00100},
-    // r
-    {
-      0b00000, 
-      0b00000, 
-      0b11110, 
-      0b10001, 
-      0b10000, 
-      0b10000,
-      0b10000
-      },
-    // u
-    {
-      0b00000, 
-      0b00000, 
-      0b10001,
-      0b10001, 
-      0b10001, 
-      0b10001, 
-      0b01110 
-      },
-    // e
-    {
-      0b00000,
-      0b00000, 
-      0b01110, 
-      0b10001, 
-      0b11111, 
-      0b10000, 
-      0b01111
-      },
-    // C
-    {
-      0b01110, 
-      0b10001, 
-      0b10000, 
-      0b10000, 
-      0b10000, 
-      0b10001, 
-      0b01110
-      },
-    // o
-    {
-      0b00000, 
-      0b00000, 
-      0b01110, 
-      0b10001, 
-      0b10001, 
-      0b10001, 
-      0b01110
-      },
-    // n
-    {
-      0b00000,  
-      0b00000, 
-      0b11110, 
-      0b10001, 
-      0b10001, 
-      0b10001,
-      0b10001,
-      },
-    // f
-    {
-      0b00110,
-      0b01000,
-      0b11100,
-      0b01000,
-      0b01000,
-      0b01000,
-      0b01000
-      }
+    {0b00000, 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100},
+    {0b00000, 0b00000, 0b11110, 0b10001, 0b10000, 0b10000, 0b10000},
+    {0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110},
+    {0b00000, 0b00000, 0b01110, 0b10001, 0b11111, 0b10000, 0b01111},
+    {0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110},
+    {0b00000, 0b00000, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110},
+    {0b00000, 0b00000, 0b11110, 0b10001, 0b10001, 0b10001, 0b10001},
+    {0b00110, 0b01000, 0b11100, 0b01000, 0b01000, 0b01000, 0b01000}
 };
-
 
 // === ПРОТОТИПЫ ФУНКЦИЙ ===
 void drawClockDisplay();
@@ -169,6 +101,7 @@ void drawBinaryRow(int value, int rowY, int maxBits);
 void drawAbstractPixels();
 void initializeAbstractPixels();
 void updateAbstractPixels();
+void drawPixelRotated(int x, int y);
 void enterEditMode();
 void incrementEditValue();
 void confirmAndNextStep();
@@ -193,7 +126,7 @@ void setup() {
     scrollPos = 0;
     lastScrollTime = millis();
     
-    Serial.println("Часы с абстрактными пикселями.");
+    Serial.println("Часы с абстрактными пикселями и поворотом из режима бегущей строки.");
 }
 
 void loop() {
@@ -211,24 +144,33 @@ void loop() {
             if (buttonState == LOW) {
                 lastClickTime = millis();
                 isHoldingInBinaryMode = false;
+                actionProcessed = false;
             } else {
                 unsigned long pressDuration = millis() - lastClickTime;
                 
-                if (displayMode != 2) {
-                    if (pressDuration > 1500) {
-                        if (displayMode == 0) {
-                            enterEditMode();
+                // ТОЛЬКО ОДИН РАЗ обрабатываем действие при отпускании!
+                if (!actionProcessed) {
+                    actionProcessed = true;
+                    
+                    if (displayMode != 2) {
+                        if (pressDuration > 500) {
+                            if (displayMode == 0) {
+                                enterEditMode();
+                            } else if (displayMode == 4) {
+                                isScreenRotated = !isScreenRotated;
+                            }
+                        } else if (pressDuration > debounceDelay) {
+                            // Быстрое нажатие - переключение режима
+                            displayMode++;
+                            if (displayMode > 5) displayMode = 0;
+                            if (displayMode == 2) displayMode = 3;
                         }
-                    } else if (pressDuration > debounceDelay && pressDuration <= 1500) {
-                        displayMode++;
-                        if (displayMode > 5) displayMode = 0;
-                        if (displayMode == 2) displayMode = 3;
-                    }
-                } else {
-                    if (pressDuration > 1500) {
-                        confirmAndNextStep();
-                    } else if (pressDuration > debounceDelay && pressDuration <= 1500) {
-                        incrementEditValue();
+                    } else {
+                        if (pressDuration > 500) {
+                            confirmAndNextStep();
+                        } else if (pressDuration > debounceDelay) {
+                            incrementEditValue();
+                        }
                     }
                 }
             }
@@ -255,6 +197,16 @@ void loop() {
     
     matrix.write();
     delay(50);
+}
+
+
+// === ФУНКЦИЯ ПОВОРОТА ПИКСЕЛЯ ===
+void drawPixelRotated(int x, int y) {
+    if (isScreenRotated) {
+        matrix.drawPixel(31 - x, 7 - y, HIGH);
+    } else {
+        matrix.drawPixel(x, y, HIGH);
+    }
 }
 
 void enterEditMode() {
@@ -320,6 +272,16 @@ void drawBinaryClockDisplay() {
         drawSmallNumber(now.Second(), 24, 0);
     } else {
         isHoldingInBinaryMode = false;
+
+        // === ЛЕВЫЙ ТРЕУГОЛЬНИК ◀ ===
+        int startX = 5;
+        drawPixelRotated(startX, 0);
+        drawPixelRotated(startX + 1, 1);
+        drawPixelRotated(startX, 2);
+        drawPixelRotated(startX, 5);
+        drawPixelRotated(startX + 1, 6);
+        drawPixelRotated(startX, 7);
+
         drawBinaryRow(now.Hour(), 0, 6);
         drawBinaryRow(now.Minute(), 3, 6);
         drawBinaryRow(now.Second(), 6, 6);
@@ -327,14 +289,14 @@ void drawBinaryClockDisplay() {
 }
 
 void drawBinaryRow(int value, int rowY, int maxBits) {
-    int startX = 8;
+    int startX = 10;
     for (int bit = maxBits - 1; bit >= 0; bit--) {
         int xPos = startX + (maxBits - 1 - bit) * 3;
         if (value & (1 << bit)) {
             for (int x = 0; x < 2; x++) {
                 if (rowY + 1 < 8) {
-                    matrix.drawPixel(xPos + x, rowY, HIGH);
-                    matrix.drawPixel(xPos + x, rowY + 1, HIGH);
+                    drawPixelRotated(xPos + x, rowY);
+                    drawPixelRotated(xPos + x, rowY + 1);
                 }
             }
         }
@@ -392,7 +354,7 @@ void drawScrollingChar(int charIdx, int xStart) {
                 int pixelX = xStart + col;
                 int pixelY = row;
                 if (pixelX >= 0 && pixelX < 32 && pixelY >= 0 && pixelY < 8) {
-                    matrix.drawPixel(pixelX, pixelY, HIGH);
+                    drawPixelRotated(pixelX, pixelY);
                 }
             }
         }
@@ -410,43 +372,98 @@ void initializeAbstractPixels() {
     lastAbstractUpdateTime = millis();
 }
 
+// === ГЛОБАЛЬНАЯ ПЕРЕМЕННАЯ ===
+int abstractMode = 0;  // 0=нормальный, 1=бурный, 2=хаос, 3=лед
+bool longPressDetected = false;  // ФЛАГ: был ли долгий пресс
+
 void drawAbstractPixels() {
     unsigned long currentTime = millis();
     
-    // Обновляем каждые 100мс для эффекта мерцания
-    if (currentTime - lastAbstractUpdateTime > 20) {
-        lastAbstractUpdateTime = currentTime;
-        updateAbstractPixels();
+    unsigned long currentHoldTime = millis() - lastClickTime;
+    bool isButtonHeld = (buttonState == LOW);
+    
+    // === ОТМЕЧАЕМ ДОЛГИЙ ПРЕСС ===
+    if (isButtonHeld && currentHoldTime > 500 && !longPressDetected) {
+        longPressDetected = true;  // Первый раз >500мс - отмечаем
     }
     
-    // Рисуем пиксели
+    // === ОТПУСКАНИЕ ПОСЛЕ ДОЛГОГО ПРЕССА ===
+    static bool wasLongPressReleased = false;
+    if (!isButtonHeld && longPressDetected && !wasLongPressReleased) {
+        // ПЕРЕКЛЮЧЕНИЕ РЕЖИМА!
+        abstractMode = (abstractMode + 1) % 5;
+        longPressDetected = false;
+        wasLongPressReleased = true;
+    }
+    
+    // СБРОС при новом нажатии
+    if (isButtonHeld && currentHoldTime < 50) {
+        longPressDetected = false;
+        wasLongPressReleased = false;
+    }
+    
+    // ОБНОВЛЯЕМ СОГЛАСНО РЕЖИМУ
+    if (currentTime - lastAbstractUpdateTime > 20) {
+        lastAbstractUpdateTime = currentTime;
+        updateAbstractPixelsByMode(abstractMode);
+    }
+    
+    // РИСУЕМ ПИКСЕЛИ
     for (int y = 0; y < 8; y++) {
         for (int x = 0; x < 32; x++) {
             if (abstractGrid[y][x]) {
-                matrix.drawPixel(x, y, HIGH);
+                drawPixelRotated(x, y);
             }
         }
     }
 }
 
-void updateAbstractPixels() {
-    // Каждый пиксель имеет вероятность измениться (включиться или выключиться)
-    // Это создаёт эффект "сжигания" и "охлаждения" экрана
-    
+
+// === ФУНКЦИЯ ДЛЯ РЕЖИМОВ ===
+void updateAbstractPixelsByMode(int mode) {
     for (int y = 0; y < 8; y++) {
         for (int x = 0; x < 32; x++) {
             int chance = random(100);
             
-            if (abstractGrid[y][x] == 1) {
-                // Если пиксель включён, может выключиться (30% остаёется, 70% выключается)
-                if (chance < 95) {
-                    abstractGrid[y][x] = 0;
-                }
-            } else {
-                // Если пиксель выключен, может включиться (80% остаётся выключенным, 20% включается)
-                if (chance < 5) {
-                    abstractGrid[y][x] = 1;
-                }
+            switch(mode) {
+                case 0:
+                    if (abstractGrid[y][x] == 1) {
+                        if (chance < 95) abstractGrid[y][x] = 0;
+                    } else {
+                        if (chance < 5) abstractGrid[y][x] = 1;
+                    }
+                    break;
+                    
+                case 1:
+                    if (abstractGrid[y][x] == 1) {
+                        if (chance < 90) abstractGrid[y][x] = 0;
+                    } else {
+                        if (chance < 10) abstractGrid[y][x] = 1;
+                    }
+                    break;
+                    
+                case 2:
+                    if (abstractGrid[y][x] == 1) {
+                        if (chance < 80) abstractGrid[y][x] = 0;
+                    } else {
+                        if (chance < 20) abstractGrid[y][x] = 1;
+                    }
+                    break;
+                    
+                case 3:
+                    if (abstractGrid[y][x] == 1) {
+                        if (chance < 60) abstractGrid[y][x] = 0;
+                    } else {
+                        if (chance < 40) abstractGrid[y][x] = 1;
+                    }
+                    break;
+                case 4:
+                    if (abstractGrid[y][x] == 1) {
+                        if (chance < 50) abstractGrid[y][x] = 0;
+                    } else {
+                        if (chance < 50) abstractGrid[y][x] = 1;
+                    }
+                    break;
             }
         }
     }
@@ -512,20 +529,36 @@ void drawAbstractPattern() {
         resetSnakeGame();
     }
     
+    unsigned long currentHoldTime = millis() - lastClickTime;
+    bool isButtonHeld = (buttonState == LOW && currentHoldTime > 500);
+    
+    if (isButtonHeld) {
+        // === РАМКА ПРИ ЗАЖАТИИ КНОПКИ ===
+        drawSnakeFrame(currentTime);
+        
+        // Рисуем змейку поверх рамки
+        for (int i = 0; i < snakeLen; i++) {
+            drawPixelRotated(snakeX[i], snakeY[i]);
+        }
+        drawPixelRotated(foodX, foodY);
+        return;
+    }
+    
     if (isCrashing) {
         if (currentTime - crashTime > 800) {
             resetSnakeGame();
         } else {
             if (((currentTime - crashTime) / 100) % 2 == 0) {
                 for (int i = 0; i < snakeLen; i++) {
-                    matrix.drawPixel(snakeX[i], snakeY[i], HIGH);
+                    drawPixelRotated(snakeX[i], snakeY[i]);
                 }
-                matrix.drawPixel(foodX, foodY, HIGH);
+                drawPixelRotated(foodX, foodY);
             }
             return;
         }
     }
     
+    // === ОСНОВНАЯ ЛОГИКА ЗМЕЙКИ ===
     if (currentTime - lastMoveTime > 200) {
         lastMoveTime = currentTime;
         
@@ -597,13 +630,48 @@ void drawAbstractPattern() {
     }
     
     for (int i = 0; i < snakeLen; i++) {
-        matrix.drawPixel(snakeX[i], snakeY[i], HIGH);
+        drawPixelRotated(snakeX[i], snakeY[i]);
     }
     
     if ((currentTime / 200) % 2 == 0) {
-        matrix.drawPixel(foodX, foodY, HIGH);
+        drawPixelRotated(foodX, foodY);
     }
 }
+
+// === НОВАЯ ФУНКЦИЯ РАМКИ ===
+void drawSnakeFrame(unsigned long currentTime) {
+    // Пиксель через пиксель (анимация бегущей рамки)
+    bool frameOn = (currentTime / 100) % 2;  // Мигание каждые 100мс
+    
+    // ВЕРХНЯЯ ГРАНИЦА (y=0)
+    for (int x = 0; x < 32; x++) {
+        if ((x % 2 == 0) == frameOn) {
+            drawPixelRotated(x, 0);
+        }
+    }
+    
+    // НИЖНЯЯ ГРАНИЦА (y=7)
+    for (int x = 0; x < 32; x++) {
+        if ((x % 2 == 0) == frameOn) {
+            drawPixelRotated(x, 7);
+        }
+    }
+    
+    // ЛЕВАЯ ГРАНИЦА (x=0)
+    for (int y = 1; y < 7; y++) {
+        if ((y % 2 == 0) == frameOn) {
+            drawPixelRotated(0, y);
+        }
+    }
+    
+    // ПРАВАЯ ГРАНИЦА (x=31)
+    for (int y = 1; y < 7; y++) {
+        if ((y % 2 == 0) == frameOn) {
+            drawPixelRotated(31, y);
+        }
+    }
+}
+
 
 void drawSmallNumber(int value, int xStart, int yStart, bool fullBrightness) {
     drawSmallDigit(value / 10, xStart, yStart, !fullBrightness);
@@ -616,7 +684,7 @@ void drawSmallDigit(int digit, int xStart, int yStart, bool dimmed) {
         for (int col = 0; col < 4; col++) {
             if (rowData & (1 << (3 - col))) {
                 if (!dimmed || (row + col) % 2 == 0) {
-                    matrix.drawPixel(xStart + col, yStart + row, HIGH);
+                    drawPixelRotated(xStart + col, yStart + row);
                 }
             }
         }
@@ -624,8 +692,8 @@ void drawSmallDigit(int digit, int xStart, int yStart, bool dimmed) {
 }
 
 void drawColon(int xStart, int yStart) {
-    matrix.drawPixel(xStart + 1, yStart + 2, HIGH);
-    matrix.drawPixel(xStart + 1, yStart + 5, HIGH);
+    drawPixelRotated(xStart + 1, yStart + 2);
+    drawPixelRotated(xStart + 1, yStart + 5);
 }
 
 void print2digits(int number) {
