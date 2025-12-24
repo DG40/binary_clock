@@ -33,9 +33,9 @@ bool isHoldingInBinaryMode = false;
 
 // === ПОВОРОТ ЭКРАНА ===
 bool isScreenRotated = false;
-bool actionProcessed = false;  // ФЛАГ: была ли обработана акция при этом нажатии
+bool actionProcessed = false;
 
-// === ЗМЕЙКА (СОКРАЩЕНО ДО 64 СЕГМЕНТОВ) ===
+// === ЗМЕЙКА ===
 int snakeX[64];
 int snakeY[64];
 int snakeLen = 3;
@@ -60,8 +60,24 @@ const int textLength = 8;
 // === АБСТРАКТНЫЕ ПИКСЕЛИ ===
 byte abstractGrid[8][32];
 unsigned long lastAbstractUpdateTime = 0;
+int abstractMode = 0;
+bool longPressDetected = false;
 
-// === ШРИФТ ЦИФР В FLASH ===
+// === FIREWORKS (РЕЖИМ 6) ===
+struct Particle {
+    int x, y;
+    int vx, vy;
+    bool active;
+};
+Particle particles[32];
+unsigned long launchTime = 0;
+int launchHeight = 0;
+bool launching = false;
+bool exploding = false;
+#define PI 3.14159
+int launchDirection = 1;  // 1=вверх, -1=вниз
+
+// === ШРИФТЫ ===
 const byte smallDigits[10][7] PROGMEM = {
     {0b0110, 0b1001, 0b1001, 0b1001, 0b1001, 0b1001, 0b0110},
     {0b0010, 0b0110, 0b0010, 0b0010, 0b0010, 0b0010, 0b0111},
@@ -75,7 +91,6 @@ const byte smallDigits[10][7] PROGMEM = {
     {0b0110, 0b1001, 0b1001, 0b0111, 0b0001, 0b1001, 0b0110}
 };
 
-// === ШРИФТ БЕГУЩЕЙ СТРОКИ "TrueConf" ===
 const byte scrollingFont[8][7] PROGMEM = {
     {0b00000, 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100},
     {0b00000, 0b00000, 0b11110, 0b10001, 0b10000, 0b10000, 0b10000},
@@ -87,20 +102,21 @@ const byte scrollingFont[8][7] PROGMEM = {
     {0b00110, 0b01000, 0b11100, 0b01000, 0b01000, 0b01000, 0b01000}
 };
 
-// === ПРОТОТИПЫ ФУНКЦИЙ ===
+// === ПРОТОТИПЫ ===
 void drawClockDisplay();
 void drawBinaryClockDisplay();
 void drawEditDisplay();
 void drawAbstractPattern();
 void drawScrollingText();
 void drawScrollingChar(int charIdx, int xStart);
+void drawFireworks();
 void drawSmallNumber(int value, int xStart, int yStart, bool fullBrightness = true);
 void drawSmallDigit(int digit, int xStart, int yStart, bool dimmed = false);
 void drawColon(int xStart, int yStart);
 void drawBinaryRow(int value, int rowY, int maxBits);
 void drawAbstractPixels();
 void initializeAbstractPixels();
-void updateAbstractPixels();
+void updateAbstractPixelsByMode(int mode);
 void drawPixelRotated(int x, int y);
 void enterEditMode();
 void incrementEditValue();
@@ -108,6 +124,8 @@ void confirmAndNextStep();
 void print2digits(int number);
 void resetSnakeGame();
 void generateFood();
+void drawSnakeFrame(unsigned long currentTime);
+void resetParticles();
 
 void setup() {
     Serial.begin(9600);
@@ -125,12 +143,12 @@ void setup() {
     initializeAbstractPixels();
     scrollPos = 0;
     lastScrollTime = millis();
+    resetParticles();
     
-    Serial.println("Часы с абстрактными пикселями и поворотом из режима бегущей строки.");
+    Serial.println("Часы с Fireworks! 🎆");
 }
 
 void loop() {
-    // === ОБРАБОТКА КНОПКИ ===
     reading = digitalRead(buttonPin);
     
     if (reading != lastButtonState) {
@@ -148,7 +166,6 @@ void loop() {
             } else {
                 unsigned long pressDuration = millis() - lastClickTime;
                 
-                // ТОЛЬКО ОДИН РАЗ обрабатываем действие при отпускании!
                 if (!actionProcessed) {
                     actionProcessed = true;
                     
@@ -160,9 +177,8 @@ void loop() {
                                 isScreenRotated = !isScreenRotated;
                             }
                         } else if (pressDuration > debounceDelay) {
-                            // Быстрое нажатие - переключение режима
                             displayMode++;
-                            if (displayMode > 5) displayMode = 0;
+                            if (displayMode > 6) displayMode = 0;
                             if (displayMode == 2) displayMode = 3;
                         }
                     } else {
@@ -178,7 +194,6 @@ void loop() {
     }
     lastButtonState = reading;
     
-    // === ОТРИСОВКА МАТРИЦЫ ===
     matrix.fillScreen(LOW);
     
     if (millis() - lastBlinkTime > 300) {
@@ -193,14 +208,129 @@ void loop() {
         case 3: drawBinaryClockDisplay(); break;
         case 4: drawScrollingText(); break;
         case 5: drawAbstractPixels(); break;
+        case 6: drawFireworks(); break;
     }
     
     matrix.write();
     delay(50);
 }
 
+// === drawFireworks() ===
+void drawFireworks() {
+    unsigned long currentTime = millis();
+    unsigned long holdTime = currentTime - lastClickTime;
+    
+    // === ЛАУНЧ при зажатии >300мс ===
+    static bool rocketActive = false;
+    if (buttonState == LOW && holdTime > 300 && !rocketActive && !exploding) {
+        rocketActive = true;
+        launchTime = currentTime;
+        launchHeight = 0;  // НАЧИНАЕМ СНИЗУ
+        launchDirection = 1;  // ВВЕРХ
+        resetParticles();
+    }
+    
+    // === ОТПУСКАНИЕ → ВЗРЫВ ===
+    if (buttonState == HIGH && rocketActive) {
+        exploding = true;
+        launchFirework(launchHeight);
+        rocketActive = false;
+        launchDirection = 1;
+    }
+    
+    // === РАКЕТА КАТАЕТСЯ СНИЗУ ВВЕРХ, СВЕРХУ ВНИЗ ===
+    if (rocketActive) {
+        unsigned long elapsed = currentTime - launchTime;
+        int position = (elapsed / 60) % 14;  // Период 14 кадров (7 вверх + 7 вниз)
+        
+        if (position <= 7) {
+            // ВВЕРХ (0-7)
+            launchHeight = position;
+            launchDirection = 1;
+        } else {
+            // ВНИЗ (7-0)
+            launchHeight = 14 - position;
+            launchDirection = -1;
+        }
+        
+        // Рисуем ракету
+        drawPixelRotated(16, launchHeight);
+        drawPixelRotated(15, launchHeight);
+        drawPixelRotated(17, launchHeight);
+    }
+    
+    // === ВЗРЫВ ===
+    if (exploding) {
+        updateParticles();
+        drawParticles();
+        
+        bool allDead = true;
+        for (int i = 0; i < 32; i++) {
+            if (particles[i].active) {
+                allDead = false;
+                break;
+            }
+        }
+        if (allDead) {
+            exploding = false;
+            resetParticles();
+        }
+    }
+}
 
-// === ФУНКЦИЯ ПОВОРОТА ПИКСЕЛЯ ===
+void launchFirework(int height) {
+    unsigned long holdDuration = millis() - launchTime;
+    int particleCount = map(holdDuration, 300, 2000, 8, 24);
+    particleCount = constrain(particleCount, 8, 24);
+    
+    int centerX = 16;
+    int centerY = 7 - height;
+    
+    for (int i = 0; i < particleCount; i++) {
+        particles[i].x = centerX;
+        particles[i].y = centerY;
+        // Направления: 8 основных + промежуточные
+        float angle = (i * 360.0 / particleCount) * PI / 180.0;
+        particles[i].vx = (cos(angle) * random(20, 50)) / 10.0;
+        particles[i].vy = (sin(angle) * random(20, 50)) / 10.0;
+        particles[i].active = true;
+    }
+}
+
+void updateParticles() {
+    for (int i = 0; i < 32; i++) {
+        if (particles[i].active) {
+            particles[i].x += particles[i].vx;
+            particles[i].y += particles[i].vy;
+            particles[i].vy += 0.15;  // Гравитация
+            
+            // Границы + затухание
+            if (particles[i].y > 7 || particles[i].x < -2 || particles[i].x > 33 || 
+                particles[i].y < -2 || abs(particles[i].vx) < 0.1) {
+                particles[i].active = false;
+            }
+        }
+    }
+}
+
+void drawParticles() {
+    for (int i = 0; i < 32; i++) {
+        if (particles[i].active) {
+            int px = constrain((int)particles[i].x, 0, 31);
+            int py = constrain((int)particles[i].y, 0, 7);
+            drawPixelRotated(px, py);
+        }
+    }
+}
+
+
+void resetParticles() {
+    for (int i = 0; i < 32; i++) {
+        particles[i].active = false;
+    }
+}
+
+// === ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений) ===
 void drawPixelRotated(int x, int y) {
     if (isScreenRotated) {
         matrix.drawPixel(31 - x, 7 - y, HIGH);
@@ -219,19 +349,14 @@ void enterEditMode() {
 }
 
 void incrementEditValue() {
-    if (editStep == 0) {
-        editHours = (editHours + 1) % 24;
-    } else if (editStep == 1) {
-        editMinutes = (editMinutes + 1) % 60;
-    } else {
-        editSeconds = (editSeconds + 1) % 60;
-    }
+    if (editStep == 0) editHours = (editHours + 1) % 24;
+    else if (editStep == 1) editMinutes = (editMinutes + 1) % 60;
+    else editSeconds = (editSeconds + 1) % 60;
 }
 
 void confirmAndNextStep() {
-    if (editStep < 2) {
-        editStep++;
-    } else {
+    if (editStep < 2) editStep++;
+    else {
         RtcDateTime dt(2025, 12, 21, editHours, editMinutes, editSeconds);
         Rtc.SetDateTime(dt);
         displayMode = 0;
@@ -245,35 +370,18 @@ void drawClockDisplay() {
     drawSmallNumber(now.Minute(), 12, 0);
     drawColon(20, 0);
     drawSmallNumber(now.Second(), 24, 0);
-    
-    static unsigned long lastPrintTime = 0;
-    if (millis() - lastPrintTime > 1000) {
-        lastPrintTime = millis();
-        Serial.print("Время: ");
-        print2digits(now.Hour());
-        Serial.print(":");
-        print2digits(now.Minute());
-        Serial.print(":");
-        print2digits(now.Second());
-        Serial.println();
-    }
 }
 
 void drawBinaryClockDisplay() {
     RtcDateTime now = Rtc.GetDateTime();
-    
     unsigned long currentHoldTime = millis() - lastClickTime;
     if (buttonState == LOW && currentHoldTime > 500) {
-        isHoldingInBinaryMode = true;
         drawSmallNumber(now.Hour(), 0, 0);
         drawColon(8, 0);
         drawSmallNumber(now.Minute(), 12, 0);
         drawColon(20, 0);
         drawSmallNumber(now.Second(), 24, 0);
     } else {
-        isHoldingInBinaryMode = false;
-
-        // === ЛЕВЫЙ ТРЕУГОЛЬНИК ◀ ===
         int startX = 5;
         drawPixelRotated(startX, 0);
         drawPixelRotated(startX + 1, 1);
@@ -281,7 +389,6 @@ void drawBinaryClockDisplay() {
         drawPixelRotated(startX, 5);
         drawPixelRotated(startX + 1, 6);
         drawPixelRotated(startX, 7);
-
         drawBinaryRow(now.Hour(), 0, 6);
         drawBinaryRow(now.Minute(), 3, 6);
         drawBinaryRow(now.Second(), 6, 6);
@@ -304,45 +411,26 @@ void drawBinaryRow(int value, int rowY, int maxBits) {
 }
 
 void drawEditDisplay() {
-    if (editStep == 0 && blinkState) {
-        drawSmallNumber(editHours, 0, 0, false);
-    } else {
-        drawSmallNumber(editHours, 0, 0);
-    }
+    if (editStep == 0 && blinkState) drawSmallNumber(editHours, 0, 0, false);
+    else drawSmallNumber(editHours, 0, 0);
     drawColon(8, 0);
-    
-    if (editStep == 1 && blinkState) {
-        drawSmallNumber(editMinutes, 12, 0, false);
-    } else {
-        drawSmallNumber(editMinutes, 12, 0);
-    }
+    if (editStep == 1 && blinkState) drawSmallNumber(editMinutes, 12, 0, false);
+    else drawSmallNumber(editMinutes, 12, 0);
     drawColon(20, 0);
-    
-    if (editStep == 2 && blinkState) {
-        drawSmallNumber(editSeconds, 24, 0, false);
-    } else {
-        drawSmallNumber(editSeconds, 24, 0);
-    }
+    if (editStep == 2 && blinkState) drawSmallNumber(editSeconds, 24, 0, false);
+    else drawSmallNumber(editSeconds, 24, 0);
 }
 
-// === БЕГУЩАЯ СТРОКА ===
 void drawScrollingText() {
     unsigned long currentTime = millis();
-    
     if (currentTime - lastScrollTime > 40) {
         lastScrollTime = currentTime;
         scrollPos++;
-        if (scrollPos > 32 + 32 + 5 * textLength) {
-            scrollPos = 0;
-        }
+        if (scrollPos > 32 + 32 + 5 * textLength) scrollPos = 0;
     }
-    
     for (int charIdx = 0; charIdx < textLength; charIdx++) {
         int charX = 32 + charIdx * 6 - scrollPos;
-        
-        if (charX > -6 && charX < 32) {
-            drawScrollingChar(charIdx, charX);
-        }
+        if (charX > -6 && charX < 32) drawScrollingChar(charIdx, charX);
     }
 }
 
@@ -361,9 +449,7 @@ void drawScrollingChar(int charIdx, int xStart) {
     }
 }
 
-// === АБСТРАКТНЫЕ ПИКСЕЛИ ===
 void initializeAbstractPixels() {
-    // Инициализируем сетку пикселей (50% включены)
     for (int y = 0; y < 8; y++) {
         for (int x = 0; x < 32; x++) {
             abstractGrid[y][x] = random(100) < 50 ? 1 : 0;
@@ -372,306 +458,166 @@ void initializeAbstractPixels() {
     lastAbstractUpdateTime = millis();
 }
 
-// === ГЛОБАЛЬНАЯ ПЕРЕМЕННАЯ ===
-int abstractMode = 0;  // 0=нормальный, 1=бурный, 2=хаос, 3=лед
-bool longPressDetected = false;  // ФЛАГ: был ли долгий пресс
-
 void drawAbstractPixels() {
     unsigned long currentTime = millis();
-    
     unsigned long currentHoldTime = millis() - lastClickTime;
     bool isButtonHeld = (buttonState == LOW);
     
-    // === ОТМЕЧАЕМ ДОЛГИЙ ПРЕСС ===
     if (isButtonHeld && currentHoldTime > 500 && !longPressDetected) {
-        longPressDetected = true;  // Первый раз >500мс - отмечаем
+        longPressDetected = true;
     }
-    
-    // === ОТПУСКАНИЕ ПОСЛЕ ДОЛГОГО ПРЕССА ===
     static bool wasLongPressReleased = false;
     if (!isButtonHeld && longPressDetected && !wasLongPressReleased) {
-        // ПЕРЕКЛЮЧЕНИЕ РЕЖИМА!
         abstractMode = (abstractMode + 1) % 5;
         longPressDetected = false;
         wasLongPressReleased = true;
     }
-    
-    // СБРОС при новом нажатии
     if (isButtonHeld && currentHoldTime < 50) {
         longPressDetected = false;
         wasLongPressReleased = false;
     }
     
-    // ОБНОВЛЯЕМ СОГЛАСНО РЕЖИМУ
     if (currentTime - lastAbstractUpdateTime > 20) {
         lastAbstractUpdateTime = currentTime;
         updateAbstractPixelsByMode(abstractMode);
     }
     
-    // РИСУЕМ ПИКСЕЛИ
     for (int y = 0; y < 8; y++) {
         for (int x = 0; x < 32; x++) {
-            if (abstractGrid[y][x]) {
-                drawPixelRotated(x, y);
-            }
+            if (abstractGrid[y][x]) drawPixelRotated(x, y);
         }
+    }
+    
+    int indicatorY = abstractMode * 2;
+    if (indicatorY < 8) {
+        drawPixelRotated(30, indicatorY);
+        drawPixelRotated(31, indicatorY);
     }
 }
 
-
-// === ФУНКЦИЯ ДЛЯ РЕЖИМОВ ===
 void updateAbstractPixelsByMode(int mode) {
     for (int y = 0; y < 8; y++) {
         for (int x = 0; x < 32; x++) {
             int chance = random(100);
-            
             switch(mode) {
-                case 0:
-                    if (abstractGrid[y][x] == 1) {
-                        if (chance < 95) abstractGrid[y][x] = 0;
-                    } else {
-                        if (chance < 5) abstractGrid[y][x] = 1;
-                    }
-                    break;
-                    
-                case 1:
-                    if (abstractGrid[y][x] == 1) {
-                        if (chance < 90) abstractGrid[y][x] = 0;
-                    } else {
-                        if (chance < 10) abstractGrid[y][x] = 1;
-                    }
-                    break;
-                    
-                case 2:
-                    if (abstractGrid[y][x] == 1) {
-                        if (chance < 80) abstractGrid[y][x] = 0;
-                    } else {
-                        if (chance < 20) abstractGrid[y][x] = 1;
-                    }
-                    break;
-                    
-                case 3:
-                    if (abstractGrid[y][x] == 1) {
-                        if (chance < 60) abstractGrid[y][x] = 0;
-                    } else {
-                        if (chance < 40) abstractGrid[y][x] = 1;
-                    }
-                    break;
-                case 4:
-                    if (abstractGrid[y][x] == 1) {
-                        if (chance < 50) abstractGrid[y][x] = 0;
-                    } else {
-                        if (chance < 50) abstractGrid[y][x] = 1;
-                    }
-                    break;
+                case 0: if (abstractGrid[y][x] == 1 && chance < 95) abstractGrid[y][x] = 0;
+                        else if (abstractGrid[y][x] == 0 && chance < 5) abstractGrid[y][x] = 1; break;
+                case 1: if (abstractGrid[y][x] == 1 && chance < 90) abstractGrid[y][x] = 0;
+                        else if (abstractGrid[y][x] == 0 && chance < 10) abstractGrid[y][x] = 1; break;
+                case 2: if (abstractGrid[y][x] == 1 && chance < 80) abstractGrid[y][x] = 0;
+                        else if (abstractGrid[y][x] == 0 && chance < 20) abstractGrid[y][x] = 1; break;
+                case 3: if (abstractGrid[y][x] == 1 && chance < 60) abstractGrid[y][x] = 0;
+                        else if (abstractGrid[y][x] == 0 && chance < 40) abstractGrid[y][x] = 1; break;
+                case 4: if (abstractGrid[y][x] == 1 && chance < 50) abstractGrid[y][x] = 0;
+                        else if (abstractGrid[y][x] == 0 && chance < 50) abstractGrid[y][x] = 1; break;
             }
         }
-    }
-}
-
-// === ЗМЕЙКА ===
-void resetSnakeGame() {
-    snakeLen = 3;
-    snakeX[0] = 16;
-    snakeY[0] = 4;
-    snakeX[1] = 15;
-    snakeY[1] = 4;
-    snakeX[2] = 14;
-    snakeY[2] = 4;
-    
-    moveCounter = 0;
-    dirX = 1;
-    dirY = 0;
-    nextDirX = 1;
-    nextDirY = 0;
-    isCrashing = false;
-    snakeInitialized = true;
-    
-    foodX = 8;
-    foodY = 2;
-    lastMoveTime = millis();
-}
-
-void generateFood() {
-    unsigned long currentTime = millis();
-    int attempts = 0;
-    const int MAX_ATTEMPTS = 100;
-    
-    do {
-        foodX = (currentTime / 100 + moveCounter * 7 + attempts) % 32;
-        foodY = (currentTime / 200 + moveCounter * 13 + attempts) % 8;
-        
-        boolean onSnake = false;
-        for (int i = 0; i < snakeLen; i++) {
-            if (snakeX[i] == foodX && snakeY[i] == foodY) {
-                onSnake = true;
-                break;
-            }
-        }
-        
-        if (!onSnake) {
-            break;
-        }
-        
-        attempts++;
-    } while (attempts < MAX_ATTEMPTS);
-    
-    if (attempts >= MAX_ATTEMPTS) {
-        foodX = 8;
-        foodY = 2;
     }
 }
 
 void drawAbstractPattern() {
     unsigned long currentTime = millis();
-    
-    if (!snakeInitialized) {
-        resetSnakeGame();
-    }
+    if (!snakeInitialized) resetSnakeGame();
     
     unsigned long currentHoldTime = millis() - lastClickTime;
     bool isButtonHeld = (buttonState == LOW && currentHoldTime > 500);
     
     if (isButtonHeld) {
-        // === РАМКА ПРИ ЗАЖАТИИ КНОПКИ ===
         drawSnakeFrame(currentTime);
-        
-        // Рисуем змейку поверх рамки
-        for (int i = 0; i < snakeLen; i++) {
-            drawPixelRotated(snakeX[i], snakeY[i]);
-        }
+        for (int i = 0; i < snakeLen; i++) drawPixelRotated(snakeX[i], snakeY[i]);
         drawPixelRotated(foodX, foodY);
         return;
     }
     
     if (isCrashing) {
-        if (currentTime - crashTime > 800) {
-            resetSnakeGame();
-        } else {
-            if (((currentTime - crashTime) / 100) % 2 == 0) {
-                for (int i = 0; i < snakeLen; i++) {
-                    drawPixelRotated(snakeX[i], snakeY[i]);
-                }
-                drawPixelRotated(foodX, foodY);
-            }
-            return;
+        if (currentTime - crashTime > 800) resetSnakeGame();
+        else if (((currentTime - crashTime) / 100) % 2 == 0) {
+            for (int i = 0; i < snakeLen; i++) drawPixelRotated(snakeX[i], snakeY[i]);
+            drawPixelRotated(foodX, foodY);
         }
+        return;
     }
     
-    // === ОСНОВНАЯ ЛОГИКА ЗМЕЙКИ ===
     if (currentTime - lastMoveTime > 200) {
         lastMoveTime = currentTime;
-        
-        if (snakeX[0] < foodX && dirX == 0) {
-            nextDirX = 1;
-            nextDirY = 0;
-        } else if (snakeX[0] > foodX && dirX == 0) {
-            nextDirX = -1;
-            nextDirY = 0;
-        } else if (snakeY[0] < foodY && dirY == 0) {
-            nextDirX = 0;
-            nextDirY = 1;
-        } else if (snakeY[0] > foodY && dirY == 0) {
-            nextDirX = 0;
-            nextDirY = -1;
-        }
+        if (snakeX[0] < foodX && dirX == 0) { nextDirX = 1; nextDirY = 0; }
+        else if (snakeX[0] > foodX && dirX == 0) { nextDirX = -1; nextDirY = 0; }
+        else if (snakeY[0] < foodY && dirY == 0) { nextDirX = 0; nextDirY = 1; }
+        else if (snakeY[0] > foodY && dirY == 0) { nextDirX = 0; nextDirY = -1; }
         
         if (snakeLen > 1) {
             if (snakeX[1] != snakeX[0] + nextDirX || snakeY[1] != snakeY[0] + nextDirY) {
-                dirX = nextDirX;
-                dirY = nextDirY;
+                dirX = nextDirX; dirY = nextDirY;
             }
         } else {
-            dirX = nextDirX;
-            dirY = nextDirY;
+            dirX = nextDirX; dirY = nextDirY;
         }
         
         int newX = snakeX[0] + dirX;
         int newY = snakeY[0] + dirY;
-        
-        if (newX < 0) newX = 31;
-        if (newX >= 32) newX = 0;
-        if (newY < 0) newY = 7;
-        if (newY >= 8) newY = 0;
+        if (newX < 0) newX = 31; if (newX >= 32) newX = 0;
+        if (newY < 0) newY = 7; if (newY >= 8) newY = 0;
         
         boolean hitSelf = false;
         for (int i = 0; i < snakeLen; i++) {
-            if (snakeX[i] == newX && snakeY[i] == newY) {
-                hitSelf = true;
-                break;
-            }
+            if (snakeX[i] == newX && snakeY[i] == newY) { hitSelf = true; break; }
         }
-        
-        if (hitSelf) {
-            isCrashing = true;
-            crashTime = currentTime;
-            return;
-        }
+        if (hitSelf) { isCrashing = true; crashTime = currentTime; return; }
         
         for (int i = snakeLen; i > 0; i--) {
-            snakeX[i] = snakeX[i - 1];
-            snakeY[i] = snakeY[i - 1];
+            snakeX[i] = snakeX[i-1]; snakeY[i] = snakeY[i-1];
         }
-        snakeX[0] = newX;
-        snakeY[0] = newY;
+        snakeX[0] = newX; snakeY[0] = newY;
         
         if (snakeX[0] == foodX && snakeY[0] == foodY) {
-            snakeLen++;
-            moveCounter++;
-            
-            if (snakeLen >= 64) {
-                isCrashing = true;
-                crashTime = currentTime;
-                return;
-            }
-            
+            snakeLen++; moveCounter++;
+            if (snakeLen >= 64) { isCrashing = true; crashTime = currentTime; return; }
             generateFood();
         }
     }
     
-    for (int i = 0; i < snakeLen; i++) {
-        drawPixelRotated(snakeX[i], snakeY[i]);
-    }
-    
-    if ((currentTime / 200) % 2 == 0) {
-        drawPixelRotated(foodX, foodY);
-    }
+    for (int i = 0; i < snakeLen; i++) drawPixelRotated(snakeX[i], snakeY[i]);
+    if ((currentTime / 200) % 2 == 0) drawPixelRotated(foodX, foodY);
 }
 
-// === НОВАЯ ФУНКЦИЯ РАМКИ ===
 void drawSnakeFrame(unsigned long currentTime) {
-    // Пиксель через пиксель (анимация бегущей рамки)
-    bool frameOn = (currentTime / 100) % 2;  // Мигание каждые 100мс
-    
-    // ВЕРХНЯЯ ГРАНИЦА (y=0)
+    bool frameOn = (currentTime / 100) % 2;
     for (int x = 0; x < 32; x++) {
         if ((x % 2 == 0) == frameOn) {
             drawPixelRotated(x, 0);
-        }
-    }
-    
-    // НИЖНЯЯ ГРАНИЦА (y=7)
-    for (int x = 0; x < 32; x++) {
-        if ((x % 2 == 0) == frameOn) {
             drawPixelRotated(x, 7);
         }
     }
-    
-    // ЛЕВАЯ ГРАНИЦА (x=0)
     for (int y = 1; y < 7; y++) {
         if ((y % 2 == 0) == frameOn) {
             drawPixelRotated(0, y);
-        }
-    }
-    
-    // ПРАВАЯ ГРАНИЦА (x=31)
-    for (int y = 1; y < 7; y++) {
-        if ((y % 2 == 0) == frameOn) {
             drawPixelRotated(31, y);
         }
     }
 }
 
+void resetSnakeGame() {
+    snakeLen = 3; snakeX[0] = 16; snakeY[0] = 4;
+    snakeX[1] = 15; snakeY[1] = 4; snakeX[2] = 14; snakeY[2] = 4;
+    moveCounter = 0; dirX = 1; dirY = 0; nextDirX = 1; nextDirY = 0;
+    isCrashing = false; snakeInitialized = true; foodX = 8; foodY = 2;
+    lastMoveTime = millis();
+}
+
+void generateFood() {
+    unsigned long currentTime = millis();
+    int attempts = 0; const int MAX_ATTEMPTS = 100;
+    do {
+        foodX = (currentTime / 100 + moveCounter * 7 + attempts) % 32;
+        foodY = (currentTime / 200 + moveCounter * 13 + attempts) % 8;
+        boolean onSnake = false;
+        for (int i = 0; i < snakeLen; i++) {
+            if (snakeX[i] == foodX && snakeY[i] == foodY) { onSnake = true; break; }
+        }
+        if (!onSnake) break; attempts++;
+    } while (attempts < MAX_ATTEMPTS);
+    if (attempts >= MAX_ATTEMPTS) { foodX = 8; foodY = 2; }
+}
 
 void drawSmallNumber(int value, int xStart, int yStart, bool fullBrightness) {
     drawSmallDigit(value / 10, xStart, yStart, !fullBrightness);
