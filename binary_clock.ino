@@ -487,12 +487,6 @@ void drawAbstractPixels() {
             if (abstractGrid[y][x]) drawPixelRotated(x, y);
         }
     }
-    
-    int indicatorY = abstractMode * 2;
-    if (indicatorY < 8) {
-        drawPixelRotated(30, indicatorY);
-        drawPixelRotated(31, indicatorY);
-    }
 }
 
 void updateAbstractPixelsByMode(int mode) {
